@@ -152,6 +152,24 @@ func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time
 	return sql.Open("mysql", dsn)
 }
 
+// detectParentIDExpr checks if the wisp_dependencies table has the
+// depends_on_wisp_id column (new schema). Returns a SQL expression that
+// resolves the parent wisp ID from whichever column(s) are available.
+func detectParentIDExpr(db *sql.DB, dbName string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var col string
+	err := db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT column_name FROM information_schema.columns WHERE table_schema = '%s' AND table_name = 'wisp_dependencies' AND column_name = 'depends_on_wisp_id'",
+		dbName)).Scan(&col)
+	if err == nil {
+		// New schema: prefer depends_on_wisp_id, fall back to depends_on_id.
+		return "COALESCE(NULLIF(wd.depends_on_wisp_id, ''), wd.depends_on_id)"
+	}
+	// Legacy schema: only depends_on_id exists.
+	return "wd.depends_on_id"
+}
+
 // parentExcludeJoin returns a LEFT JOIN clause and WHERE condition that restricts
 // results to wisps whose parent molecule is closed, missing, or nonexistent.
 //
@@ -168,17 +186,17 @@ func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time
 //
 // Usage:
 //
-//	join, where := parentExcludeJoin(dbName)
+//	join, where := parentExcludeJoin(dbName, parentIDExpr)
 //	query := fmt.Sprintf("SELECT ... FROM `%s`.wisps w %s WHERE ... AND %s", dbName, join, where)
-func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
+func parentExcludeJoin(dbName, parentIDExpr string) (joinClause, whereCondition string) {
 	joinClause = fmt.Sprintf(
 		`LEFT JOIN (
 			SELECT DISTINCT wd.issue_id
 			FROM `+"`%s`"+`.wisp_dependencies wd
-			INNER JOIN `+"`%s`"+`.wisps parent ON parent.id = wd.depends_on_id
+			INNER JOIN `+"`%s`"+`.wisps parent ON parent.id = %s
 			WHERE wd.type = 'parent-child'
 			AND parent.status IN ('open', 'hooked', 'in_progress')
-		) open_parent ON open_parent.issue_id = w.id`, dbName, dbName)
+		) open_parent ON open_parent.issue_id = w.id`, dbName, dbName, parentIDExpr)
 	whereCondition = "open_parent.issue_id IS NULL"
 	return
 }
@@ -190,7 +208,8 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 
 	result := &ScanResult{Database: dbName}
 	now := time.Now().UTC()
-	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	parentIDExpr := detectParentIDExpr(db, dbName)
+	parentJoin, parentWhere := parentExcludeJoin(dbName, parentIDExpr)
 
 	// Count reap candidates: open wisps past max_age with eligible parent status.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
@@ -251,8 +270,8 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	// Anomaly detection: dangling parent references.
 	danglingQuery := fmt.Sprintf(`
 		SELECT COUNT(*) FROM `+"`%s`"+`.wisp_dependencies wd
-		LEFT JOIN `+"`%s`"+`.wisps parent ON parent.id = wd.depends_on_id
-		WHERE wd.type = 'parent-child' AND parent.id IS NULL`, dbName, dbName)
+		LEFT JOIN `+"`%s`"+`.wisps parent ON parent.id = %s
+		WHERE wd.type = 'parent-child' AND parent.id IS NULL`, dbName, dbName, parentIDExpr)
 	var danglingCount int
 	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil && danglingCount > 0 {
 		result.Anomalies = append(result.Anomalies, Anomaly{
@@ -273,7 +292,8 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	defer cancel()
 
 	cutoff := time.Now().UTC().Add(-maxAge)
-	parentJoin, parentWhere := parentExcludeJoin(dbName)
+	parentIDExpr := detectParentIDExpr(db, dbName)
+	parentJoin, parentWhere := parentExcludeJoin(dbName, parentIDExpr)
 	whereClause := fmt.Sprintf(
 		"w.status IN ('open', 'hooked', 'in_progress') AND w.created_at < ? AND %s", parentWhere)
 
@@ -669,6 +689,11 @@ func batchDeleteRows(ctx context.Context, db *sql.DB, dbName string, idQuery str
 		delReverse := fmt.Sprintf("DELETE FROM `%s`.`wisp_dependencies` WHERE depends_on_id IN %s", dbName, inClause) //nolint:gosec // G201: internal
 		if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
 			// Non-fatal.
+		}
+		// Also clean depends_on_wisp_id (new schema) — ignore error if column doesn't exist.
+		delReverseNew := fmt.Sprintf("DELETE FROM `%s`.`wisp_dependencies` WHERE depends_on_wisp_id IN %s", dbName, inClause) //nolint:gosec // G201: internal
+		if _, err := db.ExecContext(ctx, delReverseNew, args...); err != nil {
+			// Non-fatal: column may not exist on legacy schema.
 		}
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE id IN %s", dbName, primaryTable, inClause) //nolint:gosec // G201: internal

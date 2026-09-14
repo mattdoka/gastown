@@ -49,7 +49,7 @@ func TestFormatJSON(t *testing.T) {
 }
 
 func TestParentExcludeJoin(t *testing.T) {
-	joinClause, whereCondition := parentExcludeJoin("testdb")
+	joinClause, whereCondition := parentExcludeJoin("testdb", "wd.depends_on_id")
 
 	// JOIN clause should reference the correct database.
 	if joinClause == "" {
