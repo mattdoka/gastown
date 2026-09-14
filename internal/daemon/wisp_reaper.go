@@ -15,9 +15,9 @@ const (
 	// is cleanup work, not latency-sensitive. Was 30m before Dog-driven refactor.
 	defaultWispReaperInterval = 1 * time.Hour
 	// Wisps older than this are reaped (closed). Configurable via formula var max_age.
-	// Reduced from 24h to 2h: dog cycles complete in minutes, so 2h is generous.
-	// At ~150 wisps/hour creation rate, 24h caused backlog of ~3600 wisps (threshold: 500).
-	defaultWispMaxAge = 2 * time.Hour
+	// 30m is generous — dog cycles complete in seconds. At ~150 wisps/hour creation
+	// rate with 1h reaper interval, max-age must be < interval to avoid accumulation.
+	defaultWispMaxAge = 30 * time.Minute
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
 	defaultWispDeleteAge = 3 * 24 * time.Hour
 	// Alert threshold: if open wisp count exceeds this, the Dog should escalate.
