@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	// defaultWispReaperInterval is the patrol interval. Set to 1h since reaping
-	// is cleanup work, not latency-sensitive. Was 30m before Dog-driven refactor.
-	defaultWispReaperInterval = 1 * time.Hour
+	// defaultWispReaperInterval is the patrol interval. Reduced from 1h to 15m
+	// because patrol system creates ~2100 wisps/hour; with 30m max-age the reaper
+	// must run frequently to prevent accumulation above the 500 threshold.
+	defaultWispReaperInterval = 15 * time.Minute
 	// Wisps older than this are reaped (closed). Configurable via formula var max_age.
 	// 30m is generous — dog cycles complete in seconds. At ~150 wisps/hour creation
 	// rate with 1h reaper interval, max-age must be < interval to avoid accumulation.
